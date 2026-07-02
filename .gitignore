@@ -1,0 +1,16 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Figures (keep only final outputs in figures/)
+*.png.tmp
+*.pdf.tmp
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db

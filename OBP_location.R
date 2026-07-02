@@ -1,135 +1,166 @@
-# ==========================================
-# 1. 加载包
-# ==========================================
-if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
-if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
-if (!requireNamespace("ggrepel", quietly = TRUE)) install.packages("ggrepel")
+# ==========================================================================
+# OBP Gene Family: Genomic Localisation & Visualisation
+# Bombyx mori (silkworm) odorant-binding protein genes
+# Course: Biological Omics & Big Data
+# ==========================================================================
 
 library(ggplot2)
 library(dplyr)
 library(ggrepel)
 
-# ==========================================
-# 2. 读取数据 (交互式选择文件)
-# ==========================================
-print("请选择你的 OBP 基因数据文件 (CSV/Excel)...")
-file_path <- file.choose()
-# 兼容读取 CSV
-obp_data <- read.csv(file_path, stringsAsFactors = FALSE)
+# ── Configuration ──────────────────────────────────────────────────────────
+# Adjust these paths if your data files are located elsewhere.
+DATA_DIR   <- "data"
+FIG_DIR    <- "figures"
+dir.create(FIG_DIR, showWarnings = FALSE)
 
-# 提取基因名(第1列)和染色体(第4列)
+GENE_FILE  <- file.path(DATA_DIR, "obp_locations.txt")
+CHR_FILE   <- file.path(DATA_DIR, "BMSK_chr_lengths.txt")
+
+# ── 1. Load Data ───────────────────────────────────────────────────────────
+
+# Gene positions: expected columns: GeneName (col 1), Chromosome (col 4)
+obp_data <- read.csv(GENE_FILE, stringsAsFactors = FALSE)
 obp_data <- obp_data[, c(1, 4)]
 colnames(obp_data) <- c("GeneName", "Chromosome")
 
-print("请选择你的 染色体长度 TXT 文件 (BMSK_chr_lengths.txt)...")
-txt_path <- file.choose()
-chr_len <- read.table(txt_path, header=FALSE, col.names=c("Chr", "Length"))
+# Chromosome lengths: two columns (Chr, Length)
+chr_len <- read.table(CHR_FILE, header = FALSE,
+                      col.names = c("Chr", "Length"))
 
-# ==========================================
-# 3. 数据清洗与虚拟坐标生成
-# ==========================================
+# ── 2. Parse & Clean ───────────────────────────────────────────────────────
+
+# Extract numeric chromosome IDs
 obp_data$Chr_num <- as.numeric(gsub("[^0-9]", "", obp_data$Chromosome))
-chr_len$Chr_num <- as.numeric(gsub("[^0-9]", "", chr_len$Chr))
-obp_data <- obp_data %>% filter(!is.na(Chr_num))
+chr_len$Chr_num  <- as.numeric(gsub("[^0-9]", "", chr_len$Chr))
 
+# Keep only chromosomes that contain at least one OBP gene
+obp_data <- obp_data %>% filter(!is.na(Chr_num))
 relevant_chrs <- sort(unique(obp_data$Chr_num))
+
 obp_plot_data <- obp_data %>% filter(Chr_num %in% relevant_chrs)
-chr_plot_len <- chr_len %>% filter(Chr_num %in% relevant_chrs)
+chr_plot_len  <- chr_len  %>% filter(Chr_num %in% relevant_chrs)
 
 obp_plot_data$Chr_fact <- factor(obp_plot_data$Chr_num, levels = relevant_chrs)
-chr_plot_len$Chr_fact <- factor(chr_plot_len$Chr_num, levels = relevant_chrs)
+chr_plot_len$Chr_fact  <- factor(chr_plot_len$Chr_num,  levels = relevant_chrs)
 
-# 生成展示用的均匀坐标
+# ── 3. Compute Plot Positions ──────────────────────────────────────────────
+# Genes are evenly spaced along each chromosome for clear visualisation.
+
 obp_plot_data <- obp_plot_data %>%
   left_join(chr_plot_len[, c("Chr_num", "Length")], by = "Chr_num") %>%
   group_by(Chr_num) %>%
-  arrange(GeneName) %>% 
+  arrange(GeneName) %>%
   mutate(
-    # 缩小分布范围，让基因簇看起来更紧凑一点
-    Plot_Start = seq(from = max(Length) * 0.15, to = max(Length) * 0.85, length.out = n())
+    Plot_Start = seq(
+      from = max(Length) * 0.15,
+      to   = max(Length) * 0.85,
+      length.out = n()
+    )
   ) %>%
   ungroup()
 
-# ==========================================
-# 4. 【核心优化】智能成簇 (Clustering) 计算
-# ==========================================
-# 定义一个阈值：大于等于 4 个基因被视为一个 Cluster
-cluster_threshold <- 4
+# ── 4. Identify Gene Clusters ──────────────────────────────────────────────
+# Chromosomes carrying >= CLUSTER_THRESHOLD genes are annotated as clusters.
 
-# 计算哪些染色体形成了 Cluster
+CLUSTER_THRESHOLD <- 4
+
 clusters_info <- obp_plot_data %>%
   group_by(Chr_fact) %>%
   summarise(
     n_genes = n(),
-    min_y = min(Plot_Start) / 1e6,
-    max_y = max(Plot_Start) / 1e6,
-    mean_y = mean(Plot_Start) / 1e6
+    min_y   = min(Plot_Start) / 1e6,
+    max_y   = max(Plot_Start) / 1e6,
+    mean_y  = mean(Plot_Start) / 1e6
   ) %>%
-  filter(n_genes >= cluster_threshold) %>%
+  filter(n_genes >= CLUSTER_THRESHOLD) %>%
   mutate(Cluster_Name = paste0("Cluster ", row_number(), "\n(", n_genes, " genes)"))
 
-# 筛选出不成簇的独立基因（用于单独显示名字）
+# Isolated genes (chromosomes with fewer than threshold genes) get labels
 singles_info <- obp_plot_data %>%
   group_by(Chr_fact) %>%
-  filter(n() < cluster_threshold) %>%
+  filter(n() < CLUSTER_THRESHOLD) %>%
   ungroup()
 
-# ==========================================
-# 5. SCI 级美化绘图
-# ==========================================
+# ── 5. SCI-Style Chromosome Ideogram ───────────────────────────────────────
+
 p <- ggplot() +
-  # [底层] 画染色体骨架 (优雅的浅灰)
+
+  # Background: chromosome backbones (light grey bars)
   geom_segment(data = chr_plot_len,
                aes(x = Chr_fact, xend = Chr_fact, y = 0, yend = Length / 1e6),
-               color = "#E5E7EB", linewidth = 5, lineend = "round") +
-  
-  # [中层] 画所有基因的具体位置 (细红线横切染色体)
+               colour = "#E5E7EB", linewidth = 5, lineend = "round") +
+
+  # Gene positions: red tick marks
   geom_segment(data = obp_plot_data,
-               aes(x = as.numeric(Chr_fact) - 0.2, 
-                   xend = as.numeric(Chr_fact) + 0.2, 
+               aes(x = as.numeric(Chr_fact) - 0.2,
+                   xend = as.numeric(Chr_fact) + 0.2,
                    y = Plot_Start / 1e6, yend = Plot_Start / 1e6),
-               color = "#E41A1C", linewidth = 0.8) +
-  
-  # ================== 绘制 Cluster 学术括号 ==================
-# 1. 括号的主垂直线
-geom_segment(data = clusters_info,
-             aes(x = as.numeric(Chr_fact) + 0.35, xend = as.numeric(Chr_fact) + 0.35, 
-                 y = min_y, yend = max_y), color = "black", linewidth = 0.6) +
-  # 2. 括号顶部的小横线
+               colour = "#E41A1C", linewidth = 0.8) +
+
+  # ── Cluster annotations ──
+  # Vertical bracket line
   geom_segment(data = clusters_info,
-               aes(x = as.numeric(Chr_fact) + 0.25, xend = as.numeric(Chr_fact) + 0.35, 
-                   y = min_y, yend = min_y), color = "black", linewidth = 0.6) +
-  # 3. 括号底部的小横线
+               aes(x = as.numeric(Chr_fact) + 0.35,
+                   xend = as.numeric(Chr_fact) + 0.35,
+                   y = min_y, yend = max_y),
+               colour = "black", linewidth = 0.6) +
+  # Upper horizontal tick
   geom_segment(data = clusters_info,
-               aes(x = as.numeric(Chr_fact) + 0.25, xend = as.numeric(Chr_fact) + 0.35, 
-                   y = max_y, yend = max_y), color = "black", linewidth = 0.6) +
-  # 4. 添加 "Cluster X" 文字
+               aes(x = as.numeric(Chr_fact) + 0.25,
+                   xend = as.numeric(Chr_fact) + 0.35,
+                   y = min_y, yend = min_y),
+               colour = "black", linewidth = 0.6) +
+  # Lower horizontal tick
+  geom_segment(data = clusters_info,
+               aes(x = as.numeric(Chr_fact) + 0.25,
+                   xend = as.numeric(Chr_fact) + 0.35,
+                   y = max_y, yend = max_y),
+               colour = "black", linewidth = 0.6) +
+  # Cluster label
   geom_text(data = clusters_info,
-            aes(x = as.numeric(Chr_fact) + 0.45, y = mean_y, label = Cluster_Name),
-            hjust = 0, size = 3.5, fontface = "bold", color = "#333333", lineheight = 0.9) +
-  
-  # ================== 绘制独立基因名称 ==================
-geom_text_repel(data = singles_info,
-                aes(x = as.numeric(Chr_fact) + 0.2, y = Plot_Start / 1e6, label = GeneName),
-                size = 3.5, fontface = "italic", color = "black", direction = "y", 
-                nudge_x = 0.4, hjust = 0, segment.size = 0.4, segment.color = "grey50") +
-  
-  # [外围] 坐标系与主题设定
-  scale_y_reverse(name = "Physical Position (Mb)", 
-                  limits = c(max(chr_plot_len$Length)/1e6, -2), expand = c(0.02, 0)) + 
+            aes(x = as.numeric(Chr_fact) + 0.45, y = mean_y,
+                label = Cluster_Name),
+            hjust = 0, size = 3.5, fontface = "bold",
+            colour = "#333333", lineheight = 0.9) +
+
+  # ── Isolated gene labels (ggrepel, italicised) ──
+  geom_text_repel(data = singles_info,
+                  aes(x = as.numeric(Chr_fact) + 0.2,
+                      y = Plot_Start / 1e6, label = GeneName),
+                  size = 3.5, fontface = "italic", colour = "black",
+                  direction = "y", nudge_x = 0.4, hjust = 0,
+                  segment.size = 0.4, segment.colour = "grey50") +
+
+  # ── Coordinate system ──
+  scale_y_reverse(
+    name   = "Physical Position (Mb)",
+    limits = c(max(chr_plot_len$Length) / 1e6, -2),
+    expand = c(0.02, 0)
+  ) +
   scale_x_discrete(name = "Chromosome") +
   theme_classic(base_size = 14) +
   theme(
-    legend.position = "none", 
-    axis.line.x = element_blank(), 
-    axis.ticks.x = element_blank(), 
-    axis.text.x = element_text(size = 12, face = "bold", color = "black"),
-    axis.text.y = element_text(size = 11, color = "black"),
-    axis.title = element_text(size = 14, face = "bold"),
-    plot.margin = margin(t = 20, r = 80, b = 10, l = 10) # 右侧留足80的空白，防止Cluster文字被裁
+    legend.position  = "none",
+    axis.line.x      = element_blank(),
+    axis.ticks.x     = element_blank(),
+    axis.text.x      = element_text(size = 12, face = "bold", colour = "black"),
+    axis.text.y      = element_text(size = 11, colour = "black"),
+    axis.title       = element_text(size = 14, face = "bold"),
+    plot.margin      = margin(t = 20, r = 80, b = 10, l = 10)
   )
 
-# 打印并保存高清矢量图 (推荐发文章用 PDF)
+# ── 6. Export ──────────────────────────────────────────────────────────────
+
 print(p)
-ggsave("OBP_Genomic_Locations_SCI_Style.pdf", plot = p, width = 10, height = 7, dpi = 300)
-ggsave("OBP_Genomic_Locations_SCI_Style.png", plot = p, width = 10, height = 7, dpi = 300)
+
+pdf_out <- file.path(FIG_DIR, "OBP_Genomic_Locations_SCI_Style.pdf")
+png_out <- file.path(FIG_DIR, "OBP_Genomic_Locations_SCI_Style.png")
+ggsave(pdf_out, plot = p, width = 10, height = 7, dpi = 300)
+ggsave(png_out, plot = p, width = 10, height = 7, dpi = 300)
+
+cat(sprintf("Figures saved:\n  %s\n  %s\n", pdf_out, png_out))
+
+# ── Session Info ───────────────────────────────────────────────────────────
+cat("\n── Session Info ──\n")
+sessionInfo()
